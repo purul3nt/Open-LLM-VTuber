@@ -10,6 +10,10 @@ import cv2
 import pytesseract
 
 
+# Don't trigger LLM more than once per this many seconds (avoids 429s, matches human speaking pace)
+MIN_SECONDS_BETWEEN_VN_CALLS = 15.0
+
+
 @dataclass
 class VNReaderConfig:
     """Configuration for the visual novel reader."""
@@ -18,6 +22,7 @@ class VNReaderConfig:
     capture_interval_s: float = 0.5  # Check twice per second
     roi_rel: Tuple[float, float, float, float] = (0.30, 0.45, 0.80, 0.70)
     min_change_chars: int = 8
+    min_seconds_between_emits: float = MIN_SECONDS_BETWEEN_VN_CALLS
 
 
 @dataclass
@@ -34,6 +39,7 @@ class VNReader:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._last_text: str = ""
+        self._last_emit_time: float = 0.0
         self._callback: Optional[Callable[[DialogueEvent], None]] = None
 
     def start(self, callback: Callable[[DialogueEvent], None]) -> None:
@@ -109,8 +115,21 @@ class VNReader:
         if cleaned == self._last_text:
             return
 
+        # Debounce: don't fire more than once per min_seconds_between_emits (avoids 429s)
+        now = time.time()
+        if now - self._last_emit_time < self.config.min_seconds_between_emits:
+            logger.debug(
+                "VN reader debounce: skipping emit (%.1fs since last)",
+                now - self._last_emit_time,
+            )
+            return
+
+        self._last_emit_time = now
         self._last_text = cleaned
-        logger.info("VN reader detected new dialogue: %s", cleaned[:60] + ("..." if len(cleaned) > 60 else ""))
-        event = DialogueEvent(text=cleaned, timestamp=time.time())
+        logger.info(
+            "VN reader detected new dialogue: %s",
+            cleaned[:60] + ("..." if len(cleaned) > 60 else ""),
+        )
+        event = DialogueEvent(text=cleaned, timestamp=now)
         self._callback(event)
 

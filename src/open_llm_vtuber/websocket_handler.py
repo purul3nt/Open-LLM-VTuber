@@ -8,7 +8,12 @@ import numpy as np
 from loguru import logger
 
 from .service_context import ServiceContext
-from .vn_reader import VNReader, VNReaderConfig, DialogueEvent
+from .vn_reader import (
+    VNReader,
+    VNReaderConfig,
+    DialogueEvent,
+    MIN_SECONDS_BETWEEN_VN_CALLS,
+)
 from .vn_auto_advance import trigger_vn_advance
 from .chat_group import (
     ChatGroupManager,
@@ -82,6 +87,8 @@ class WebSocketHandler:
         self._vn_narration_count: int = 0
         # Last time we triggered auto-advance (cooldown to avoid double-clicks)
         self._vn_last_advance_time: float = 0.0
+        # Last time we dispatched VN dialogue to LLM (debounce to avoid 429s)
+        self._vn_last_dispatch_time: float = 0.0
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
@@ -262,6 +269,15 @@ class WebSocketHandler:
             logger.debug("VN dispatch skipped: no primary client")
             return
 
+        # Debounce: don't call LLM more than once per MIN_SECONDS_BETWEEN_VN_CALLS
+        now = time.monotonic()
+        if now - self._vn_last_dispatch_time < MIN_SECONDS_BETWEEN_VN_CALLS:
+            logger.debug(
+                "VN dispatch skipped: debounce (%.1fs since last)",
+                now - self._vn_last_dispatch_time,
+            )
+            return
+
         websocket = self.client_connections.get(client_uid)
         if not websocket or client_uid not in self.client_contexts:
             logger.debug(
@@ -272,6 +288,7 @@ class WebSocketHandler:
             )
             return
 
+        self._vn_last_dispatch_time = now
         self._vn_narration_count += 1
         prefix = "[GAME DIALOGUE - NARRATE ONLY]"
 

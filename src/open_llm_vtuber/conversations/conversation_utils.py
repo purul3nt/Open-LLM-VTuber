@@ -190,12 +190,15 @@ async def finalize_conversation_turn(
         await asyncio.gather(*tts_manager.task_list)
         await websocket_send(json.dumps({"type": "backend-synth-complete"}))
 
+        # Timeout so we don't block indefinitely if frontend never sends playback-complete
         response = await message_handler.wait_for_response(
-            client_uid, "frontend-playback-complete"
+            client_uid, "frontend-playback-complete", timeout=90.0
         )
 
         if not response:
-            logger.warning(f"No playback completion response from {client_uid}")
+            logger.warning(
+                f"No playback completion response from {client_uid} (timeout or disconnect)"
+            )
             return
 
     await websocket_send(json.dumps({"type": "force-new-message"}))
