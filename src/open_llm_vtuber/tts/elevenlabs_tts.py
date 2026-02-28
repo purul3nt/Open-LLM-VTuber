@@ -1,4 +1,5 @@
 # src/open_llm_vtuber/tts/elevenlabs_tts.py
+import io
 import os
 from pathlib import Path
 
@@ -48,21 +49,35 @@ class TTSEngine(TTSInterface):
         self.style = style
         self.use_speaker_boost = use_speaker_boost
 
-        # Determine file extension from output format
+        # Determine file extension and sample rate from output format
         if "mp3" in output_format:
             self.file_extension = "mp3"
+            self._pcm_sample_rate = None
         elif "pcm" in output_format:
-            self.file_extension = "wav"
+            self.file_extension = "pcm"
+            # Parse sample rate from format: pcm_16000, pcm_22050, pcm_24000, pcm_44100
+            for sr in (16000, 22050, 24000, 44100):
+                if f"pcm_{sr}" in output_format or f"pcm{sr}" in output_format:
+                    self._pcm_sample_rate = sr
+                    break
+            else:
+                self._pcm_sample_rate = 22050
         else:
             logger.warning(
                 f"Unknown output format '{output_format}', defaulting to mp3 extension."
             )
-            self.file_extension = "mp3"  # Default to mp3
+            self.file_extension = "mp3"
+            self._pcm_sample_rate = None
 
         try:
             # Initialize ElevenLabs client
             self.client = ElevenLabs(api_key=api_key)
-            logger.info("ElevenLabs TTS Engine initialized successfully")
+            if self._pcm_sample_rate:
+                logger.info(
+                    f"ElevenLabs TTS initialized (output: pcm_{self._pcm_sample_rate}, no ffmpeg required)"
+                )
+            else:
+                logger.info("ElevenLabs TTS Engine initialized successfully")
         except Exception as e:
             logger.critical(f"Failed to initialize ElevenLabs client: {e}")
             self.client = None
@@ -95,11 +110,13 @@ class TTSEngine(TTSInterface):
             )
 
             # Generate audio using ElevenLabs API (voice_id is first positional arg in SDK 2.x)
+            # optimize_streaming_latency=4 prioritizes speed (helps with quota/latency)
             audio = self.client.text_to_speech.convert(
                 self.voice_id,
                 text=text,
                 model_id=self.model_id,
                 output_format=self.output_format,
+                optimize_streaming_latency=4,
                 voice_settings=VoiceSettings(
                     stability=self.stability,
                     similarity_boost=self.similarity_boost,
@@ -130,6 +147,53 @@ class TTSEngine(TTSInterface):
             raise e
 
         return str(speech_file_path)
+
+    def generate_audio_bytes(
+        self, text: str, file_name_no_ext: str | None = None
+    ) -> tuple[bytes, str] | None:
+        """
+        Generate speech and return bytes directly (avoids file I/O race on Windows).
+        Returns (audio_bytes, format) or None if generation fails.
+        """
+        if not self.client:
+            logger.error("ElevenLabs client not initialized. Cannot generate audio.")
+            return None
+
+        try:
+            logger.debug(
+                f"Generating audio via ElevenLabs for text: '{text[:50]}...' with voice '{self.voice_id}' model '{self.model_id}'"
+            )
+
+            audio = self.client.text_to_speech.convert(
+                self.voice_id,
+                text=text,
+                model_id=self.model_id,
+                output_format=self.output_format,
+                optimize_streaming_latency=4,
+                voice_settings=VoiceSettings(
+                    stability=self.stability,
+                    similarity_boost=self.similarity_boost,
+                    style=self.style,
+                    use_speaker_boost=self.use_speaker_boost,
+                ),
+            )
+
+            buf = io.BytesIO()
+            for chunk in audio:
+                buf.write(chunk)
+            audio_bytes = buf.getvalue()
+
+            logger.info("Successfully generated audio via ElevenLabs (bytes)")
+            # For PCM, pass format like "pcm_22050" so stream_audio can convert without ffmpeg
+            if self._pcm_sample_rate:
+                fmt = f"pcm_{self._pcm_sample_rate}"
+            else:
+                fmt = self.file_extension
+            return (audio_bytes, fmt)
+
+        except Exception as e:
+            logger.critical(f"Error: ElevenLabs TTS unable to generate audio: {e}")
+            raise e
 
 
 # Example usage (optional, for testing)

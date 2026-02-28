@@ -3,6 +3,7 @@ import json
 import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Dict
 from loguru import logger
 
@@ -139,18 +140,42 @@ class TTSTaskManager:
         """Process TTS generation and queue the result for ordered delivery"""
         audio_file_path = None
         try:
+            # Prefer bytes-based generation when available (avoids Windows file race)
+            gen_bytes = getattr(tts_engine, "generate_audio_bytes", None)
+            if callable(gen_bytes):
+                file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
+                result = await asyncio.to_thread(gen_bytes, tts_text, file_name)
+                if result is not None:
+                    audio_data, ext = result
+                    payload = prepare_audio_payload(
+                        audio_path=None,
+                        display_text=display_text,
+                        actions=actions,
+                        audio_bytes=audio_data,
+                        audio_format=ext,
+                    )
+                    await self._payload_queue.put((payload, sequence_number))
+                    return
+
+            # Fallback: path-based generation
             audio_file_path = await self._generate_audio(tts_engine, tts_text)
+            with open(audio_file_path, "rb") as f:
+                audio_data = f.read()
+            ext = Path(audio_file_path).suffix.lstrip(".") or "mp3"
             payload = prepare_audio_payload(
-                audio_path=audio_file_path,
+                audio_path=None,
                 display_text=display_text,
                 actions=actions,
+                audio_bytes=audio_data,
+                audio_format=ext,
             )
-            # Queue the payload with its sequence number
             await self._payload_queue.put((payload, sequence_number))
 
         except Exception as e:
-            logger.error(f"Error preparing audio payload: {e}")
-            # Queue silent payload for error case
+            logger.error(
+                f"TTS failed: {e}. "
+                "If you see 'ffmpeg' or 'file not found': set output_format: pcm_22050 in conf.yaml (elevenlabs_tts)."
+            )
             payload = prepare_audio_payload(
                 audio_path=None,
                 display_text=display_text,

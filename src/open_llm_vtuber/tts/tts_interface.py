@@ -1,8 +1,12 @@
 import abc
 import os
 import asyncio
+from pathlib import Path
 
 from loguru import logger
+
+# Project root (where run_server.py, cache/, conf.yaml live) for reliable cache paths
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
 class TTSInterface(metaclass=abc.ABCMeta):
@@ -60,22 +64,14 @@ class TTSInterface(metaclass=abc.ABCMeta):
 
     def generate_cache_file_name(self, file_name_no_ext=None, file_extension="wav"):
         """
-        Generate a cross-platform cache file name.
-
-        file_name_no_ext: str
-            name of the file without extension
-        file_extension: str
-            file extension
-
-        Returns:
-        str: the path to the generated cache file
+        Generate a cross-platform cache file name using project-root-relative path.
+        Uses absolute path so cache works regardless of process cwd.
         """
-        cache_dir = "cache"
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir)
+        cache_dir = _PROJECT_ROOT / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
         if file_name_no_ext is None:
             file_name_no_ext = "temp"
 
         file_name = f"{file_name_no_ext}.{file_extension}"
-        return os.path.join(cache_dir, file_name)
+        return str(cache_dir / file_name)
