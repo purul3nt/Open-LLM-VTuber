@@ -7,6 +7,7 @@ import numpy as np
 from loguru import logger
 
 from .service_context import ServiceContext
+from .vn_reader import VNReader, VNReaderConfig, DialogueEvent
 from .chat_group import (
     ChatGroupManager,
     handle_group_operation,
@@ -70,6 +71,13 @@ class WebSocketHandler:
         self.default_context_cache = default_context_cache
         self.received_data_buffers: Dict[str, np.ndarray] = {}
 
+        # Visual novel reader integration
+        self._vn_reader: Optional[VNReader] = None
+        # Currently active client that should receive VN-driven conversations
+        self._vn_primary_client_uid: Optional[str] = None
+        # Counter for narration vs comment: every 5–6 narrations, add a comment (~85% narrate)
+        self._vn_narration_count: int = 0
+
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
 
@@ -124,6 +132,11 @@ class WebSocketHandler:
             )
 
             logger.info(f"Connection established for client {client_uid}")
+
+            # Automatically mark the newest client as the primary VN listener.
+            # This keeps the integration simple for the common \"single player\" setup.
+            self._vn_primary_client_uid = client_uid
+            await self._maybe_start_vn_reader()
 
         except Exception as e:
             logger.error(
@@ -235,6 +248,56 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Fatal error in WebSocket communication: {e}")
             raise
+
+    async def _dispatch_vn_event(self, event: DialogueEvent) -> None:
+        """Send a VN line into the normal conversation pipeline as text-input."""
+        client_uid = self._vn_primary_client_uid
+        if not client_uid:
+            return
+
+        websocket = self.client_connections.get(client_uid)
+        if not websocket or client_uid not in self.client_contexts:
+            return
+
+        self._vn_narration_count += 1
+        # Every 6th line: add a comment. Otherwise: narrate only (~85% narrate, ~15% comment).
+        add_comment = self._vn_narration_count % 6 == 0
+        prefix = "[GAME DIALOGUE - READ AND COMMENT]" if add_comment else "[GAME DIALOGUE - NARRATE ONLY]"
+
+        data: WSMessage = {
+            "type": "text-input",
+            "text": f"{prefix} {event.text}",
+        }
+
+        message_handler.handle_message(client_uid, data)
+        await self._handle_conversation_trigger(websocket, client_uid, data)
+
+    async def _maybe_start_vn_reader(self) -> None:
+        """Lazily start the VN reader once, when the first client connects."""
+        # Use an env var guard so users can turn this feature on/off
+        import os
+
+        enabled = os.getenv("ENABLE_VN_READER", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            return
+
+        if self._vn_reader is not None:
+            return
+
+        logger.info("Starting Visual Novel screen-capture + OCR reader...")
+        self._vn_reader = VNReader(VNReaderConfig())
+
+        loop = asyncio.get_running_loop()
+
+        def _callback(event: DialogueEvent) -> None:
+            asyncio.run_coroutine_threadsafe(self._dispatch_vn_event(event), loop)
+
+        self._vn_reader.start(_callback)
 
     async def _route_message(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
