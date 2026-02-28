@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Callable, TypedDict
 from fastapi import WebSocket, WebSocketDisconnect
 import asyncio
 import json
+import time
 from enum import Enum
 import numpy as np
 from loguru import logger
@@ -79,8 +80,8 @@ class WebSocketHandler:
         self._vn_primary_client_uid: Optional[str] = None
         # Counter for narration vs comment: every 5–6 narrations, add a comment (~85% narrate)
         self._vn_narration_count: int = 0
-        # True when the current conversation turn was triggered by VN dialogue (for auto-advance)
-        self._vn_turn_in_progress: bool = False
+        # Last time we triggered auto-advance (cooldown to avoid double-clicks)
+        self._vn_last_advance_time: float = 0.0
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
@@ -258,14 +259,19 @@ class WebSocketHandler:
         """Send a VN line into the normal conversation pipeline as text-input."""
         client_uid = self._vn_primary_client_uid
         if not client_uid:
+            logger.debug("VN dispatch skipped: no primary client")
             return
 
         websocket = self.client_connections.get(client_uid)
         if not websocket or client_uid not in self.client_contexts:
+            logger.debug(
+                "VN dispatch skipped: client %s not connected (ws=%s, ctx=%s)",
+                client_uid,
+                "ok" if websocket else "None",
+                "ok" if client_uid in self.client_contexts else "missing",
+            )
             return
 
-        self._vn_turn_in_progress = True
-        logger.info("VN turn started (auto-advance will run after Adriana finishes speaking)")
         self._vn_narration_count += 1
         prefix = "[GAME DIALOGUE - NARRATE ONLY]"
 
@@ -344,33 +350,27 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
         """
-        When the frontend finishes playing audio, optionally trigger VN auto-advance
-        (click so the visual novel advances to the next dialogue).
+        When the frontend finishes playing audio (VTuber goes idle), trigger VN auto-advance
+        once. Assumes each idle phase = one advancement. Cooldown prevents double-clicks.
         """
         import os
+        env_ok = os.getenv("ENABLE_VN_AUTO_ADVANCE", "true").lower() in ("1", "true", "yes", "on")
+        if not env_ok or self._vn_reader is None:
+            return
+        if client_uid != self._vn_primary_client_uid:
+            return
+        # Cooldown: avoid double-triggering if frontend sends multiple playback-completes
+        cooldown_s = 1.5
+        if (time.monotonic() - self._vn_last_advance_time) < cooldown_s:
+            return
+        config = self._vn_config if self._vn_config is not None else VNReaderConfig()
         logger.info(
-            f"frontend-playback-complete received | client={client_uid} vn_turn={self._vn_turn_in_progress} vn_primary={self._vn_primary_client_uid} vn_reader={self._vn_reader is not None}"
+            "VN auto-advance: VTuber idle, triggering click (monitor_index=%s roi_rel=%s)",
+            config.monitor_index,
+            config.roi_rel,
         )
-        do_advance = (
-            self._vn_turn_in_progress
-            and client_uid == self._vn_primary_client_uid
-            and os.getenv("ENABLE_VN_AUTO_ADVANCE", "true").lower() in ("1", "true", "yes", "on")
-        )
-        if do_advance:
-            # Use same config as VN reader (same monitor + ROI as OCR)
-            config = self._vn_config if self._vn_config is not None else VNReaderConfig()
-            logger.info(
-                "VN auto-advance: triggering click now (playback complete) monitor_index=%s roi_rel=%s",
-                config.monitor_index,
-                config.roi_rel,
-            )
-            await asyncio.to_thread(trigger_vn_advance, config)
-            self._vn_turn_in_progress = False
-        else:
-            if self._vn_turn_in_progress and client_uid != self._vn_primary_client_uid:
-                logger.info("VN auto-advance: skipped (not primary VN client)")
-            elif not self._vn_turn_in_progress:
-                logger.info("VN auto-advance: skipped (vn_turn=False, not a VN dialogue turn)")
+        await asyncio.to_thread(trigger_vn_advance, config)
+        self._vn_last_advance_time = time.monotonic()
 
     async def _handle_group_operation(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -627,15 +627,6 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
         """Handle triggers that start a conversation"""
-        # Mark as VN turn when input is game dialogue (manual or from VN reader).
-        # Enables auto-advance after playback. Works even if VN reader is not started.
-        if (
-            data.get("type") == "text-input"
-            and "[GAME DIALOGUE" in (data.get("text") or "")
-            and client_uid == self._vn_primary_client_uid
-        ):
-            self._vn_turn_in_progress = True
-            logger.info("VN turn started (auto-advance will run after Adriana finishes speaking)")
         await handle_conversation_trigger(
             msg_type=data.get("type", ""),
             data=data,
