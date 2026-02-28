@@ -241,9 +241,14 @@ class BasicMemoryAgent(AgentInterface):
 
     def _to_messages(self, input_data: BatchInput) -> List[Dict[str, Any]]:
         """Prepare messages for LLM API call."""
-        messages = self._memory.copy()
+        text_prompt = self._to_text_prompt(input_data) or ""
+        is_vn_dialogue = "[GAME DIALOGUE" in text_prompt
+        # For VN narration: use short context (last 4 msgs) to reduce latency
+        if is_vn_dialogue and len(self._memory) > 4:
+            messages = self._memory[-4:].copy()
+        else:
+            messages = self._memory.copy()
         user_content = []
-        text_prompt = self._to_text_prompt(input_data)
         if text_prompt:
             user_content.append({"type": "text", "text": text_prompt})
 

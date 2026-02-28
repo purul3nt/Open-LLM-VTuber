@@ -3,6 +3,8 @@ This class is responsible for handling asynchronous interaction with OpenAI API 
 endpoints for language generation.
 """
 
+import asyncio
+import time
 from typing import AsyncIterator, List, Dict, Any
 from openai import (
     AsyncStream,
@@ -20,6 +22,11 @@ from loguru import logger
 from .stateless_llm_interface import StatelessLLMInterface
 from ...mcpp.types import ToolCallObject
 
+# Global throttle for Mistral (1 req/s): shared across all clients using api.mistral.ai
+_mistral_throttle_lock = asyncio.Lock()
+_mistral_last_request_time = 0.0
+_MISTRAL_THROTTLE_INTERVAL_S = 1.0
+
 
 class AsyncLLM(StatelessLLMInterface):
     def __init__(
@@ -30,6 +37,7 @@ class AsyncLLM(StatelessLLMInterface):
         organization_id: str = "z",
         project_id: str = "z",
         temperature: float = 1.0,
+        max_tokens: int = 256,
     ):
         """
         Initializes an instance of the `AsyncLLM` class.
@@ -45,6 +53,7 @@ class AsyncLLM(StatelessLLMInterface):
         self.base_url = base_url
         self.model = model
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.client = AsyncOpenAI(
             base_url=base_url,
             organization=organization_id,
@@ -97,15 +106,47 @@ class AsyncLLM(StatelessLLMInterface):
 
             available_tools = tools if self.support_tools else NOT_GIVEN
 
-            stream: AsyncStream[
-                ChatCompletionChunk
-            ] = await self.client.chat.completions.create(
-                messages=messages_with_system,
-                model=self.model,
-                stream=True,
-                temperature=self.temperature,
-                tools=available_tools,
-            )
+            # Mistral: cap to 1 request per second to avoid 429
+            if "mistral.ai" in self.base_url:
+                global _mistral_last_request_time
+                async with _mistral_throttle_lock:
+                    now = time.monotonic()
+                    wait_s = _mistral_last_request_time + _MISTRAL_THROTTLE_INTERVAL_S - now
+                    if wait_s > 0:
+                        logger.debug(
+                            "Mistral throttle: waiting %.2fs before next request",
+                            wait_s,
+                        )
+                        await asyncio.sleep(wait_s)
+                    _mistral_last_request_time = time.monotonic()
+
+            # Retry on 429 rate limit with exponential backoff
+            max_retries = 3
+            base_delay_s = 2.0
+            stream = None
+            for attempt in range(max_retries):
+                try:
+                    stream = await self.client.chat.completions.create(
+                        messages=messages_with_system,
+                        model=self.model,
+                        stream=True,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        tools=available_tools,
+                    )
+                    break
+                except RateLimitError as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    delay = base_delay_s * (2**attempt)
+                    logger.warning(
+                        "Rate limit (429) hit, retrying in %.1fs (attempt %d/%d)",
+                        delay,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    await asyncio.sleep(delay)
+
             logger.debug(
                 f"Tool Support: {self.support_tools}, Available tools: {available_tools}"
             )
