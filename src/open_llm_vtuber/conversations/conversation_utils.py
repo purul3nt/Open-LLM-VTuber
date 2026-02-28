@@ -16,6 +16,22 @@ from ..tts.tts_interface import TTSInterface
 from ..utils.stream_audio import prepare_audio_payload
 
 
+def _is_error_message(text: str) -> bool:
+    """Return True if text looks like an error message (do not send to TTS)."""
+    if not text or len(text.strip()) < 10:
+        return False
+    t = text.strip().lower()
+    return (
+        "error calling" in t
+        or "rate limit" in t
+        or "429" in t
+        or "see the logs for details" in t
+        or "please try again later" in t
+        or "connection error" in t
+        or "failed to connect" in t
+    )
+
+
 # Convert class methods to standalone functions
 def create_batch_input(
     input_text: str,
@@ -101,6 +117,10 @@ async def handle_sentence_output(
         else:
             logger.debug("🚫 No translation engine available. Skipping translation.")
 
+        # Do not send error messages to TTS or display (log only)
+        if _is_error_message(tts_text):
+            logger.warning(f"Skipping TTS for error message: {tts_text[:80]}...")
+            continue
         full_response += display_text.text
         await tts_manager.speak(
             tts_text=tts_text,

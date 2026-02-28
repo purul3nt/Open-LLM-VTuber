@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
+from loguru import logger
 import mss
 import numpy as np
 import cv2
@@ -109,6 +110,7 @@ class VNReader:
             return
 
         self._last_text = cleaned
+        logger.info("VN reader detected new dialogue: %s", cleaned[:60] + ("..." if len(cleaned) > 60 else ""))
         event = DialogueEvent(text=cleaned, timestamp=time.time())
         self._callback(event)
 

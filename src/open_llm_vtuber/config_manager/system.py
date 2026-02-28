@@ -1,7 +1,18 @@
 # config_manager/system.py
 from pydantic import Field, model_validator
-from typing import Dict, ClassVar
+from typing import Dict, ClassVar, Optional, List
 from .i18n import I18nMixin, Description
+
+
+class VNReaderConfigSchema(I18nMixin):
+    """VN reader settings (monitor, ROI for dialogue box)."""
+
+    monitor_index: int = Field(1, alias="monitor_index")
+    roi_rel: List[float] = Field(
+        default=[0.30, 0.45, 0.80, 0.70],
+        alias="roi_rel",
+    )
+    min_change_chars: int = Field(8, alias="min_change_chars")
 
 
 class SystemConfig(I18nMixin):
@@ -13,6 +24,10 @@ class SystemConfig(I18nMixin):
     config_alts_dir: str = Field(..., alias="config_alts_dir")
     tool_prompts: Dict[str, str] = Field(..., alias="tool_prompts")
     enable_proxy: bool = Field(False, alias="enable_proxy")
+    enable_vn_reader: bool = Field(False, alias="enable_vn_reader")
+    vn_reader_config: Optional[VNReaderConfigSchema] = Field(
+        default=None, alias="vn_reader_config"
+    )
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "conf_version": Description(en="Configuration version", zh="配置文件版本"),
@@ -28,6 +43,14 @@ class SystemConfig(I18nMixin):
         "enable_proxy": Description(
             en="Enable proxy mode for multiple clients",
             zh="启用代理模式以支持多个客户端使用一个 ws 连接",
+        ),
+        "enable_vn_reader": Description(
+            en="Enable Visual Novel screen-capture reader and auto-advance",
+            zh="启用视觉小说屏幕捕获阅读器和自动推进",
+        ),
+        "vn_reader_config": Description(
+            en="VN reader monitor and ROI (dialogue box region)",
+            zh="VN阅读器显示器和区域",
         ),
     }
 

@@ -8,6 +8,7 @@ from loguru import logger
 
 from .service_context import ServiceContext
 from .vn_reader import VNReader, VNReaderConfig, DialogueEvent
+from .vn_auto_advance import trigger_vn_advance
 from .chat_group import (
     ChatGroupManager,
     handle_group_operation,
@@ -42,7 +43,7 @@ class MessageType(Enum):
     ]
     CONVERSATION = ["mic-audio-end", "text-input", "ai-speak-signal"]
     CONFIG = ["fetch-configs", "switch-config"]
-    CONTROL = ["interrupt-signal", "audio-play-start"]
+    CONTROL = ["interrupt-signal", "audio-play-start", "frontend-playback-complete"]
     DATA = ["mic-audio-data"]
 
 
@@ -73,10 +74,13 @@ class WebSocketHandler:
 
         # Visual novel reader integration
         self._vn_reader: Optional[VNReader] = None
+        self._vn_config: Optional[VNReaderConfig] = None
         # Currently active client that should receive VN-driven conversations
         self._vn_primary_client_uid: Optional[str] = None
         # Counter for narration vs comment: every 5–6 narrations, add a comment (~85% narrate)
         self._vn_narration_count: int = 0
+        # True when the current conversation turn was triggered by VN dialogue (for auto-advance)
+        self._vn_turn_in_progress: bool = False
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
@@ -101,6 +105,7 @@ class WebSocketHandler:
             "switch-config": self._handle_config_switch,
             "fetch-backgrounds": self._handle_fetch_backgrounds,
             "audio-play-start": self._handle_audio_play_start,
+            "frontend-playback-complete": self._handle_frontend_playback_complete,
             "request-init-config": self._handle_init_config_request,
             "heartbeat": self._handle_heartbeat,
         }
@@ -259,10 +264,10 @@ class WebSocketHandler:
         if not websocket or client_uid not in self.client_contexts:
             return
 
+        self._vn_turn_in_progress = True
+        logger.info("VN turn started (auto-advance will run after Adriana finishes speaking)")
         self._vn_narration_count += 1
-        # Every 6th line: add a comment. Otherwise: narrate only (~85% narrate, ~15% comment).
-        add_comment = self._vn_narration_count % 6 == 0
-        prefix = "[GAME DIALOGUE - READ AND COMMENT]" if add_comment else "[GAME DIALOGUE - NARRATE ONLY]"
+        prefix = "[GAME DIALOGUE - NARRATE ONLY]"
 
         data: WSMessage = {
             "type": "text-input",
@@ -274,15 +279,18 @@ class WebSocketHandler:
 
     async def _maybe_start_vn_reader(self) -> None:
         """Lazily start the VN reader once, when the first client connects."""
-        # Use an env var guard so users can turn this feature on/off
         import os
 
-        enabled = os.getenv("ENABLE_VN_READER", "false").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
+        # Enable via conf.yaml (system_config.enable_vn_reader) or env ENABLE_VN_READER
+        config_enabled = getattr(
+            self.default_context_cache.system_config,
+            "enable_vn_reader",
+            False,
+        )
+        env_enabled = os.getenv("ENABLE_VN_READER", "").lower() in {
+            "1", "true", "yes", "on",
         }
+        enabled = config_enabled or env_enabled
         if not enabled:
             return
 
@@ -290,7 +298,17 @@ class WebSocketHandler:
             return
 
         logger.info("Starting Visual Novel screen-capture + OCR reader...")
-        self._vn_reader = VNReader(VNReaderConfig())
+        sc = self.default_context_cache.system_config
+        cfg = getattr(sc, "vn_reader_config", None)
+        if cfg:
+            self._vn_config = VNReaderConfig(
+                monitor_index=cfg.monitor_index,
+                roi_rel=tuple(cfg.roi_rel) if cfg.roi_rel else (0.30, 0.45, 0.80, 0.70),
+                min_change_chars=cfg.min_change_chars,
+            )
+        else:
+            self._vn_config = VNReaderConfig()
+        self._vn_reader = VNReader(self._vn_config)
 
         loop = asyncio.get_running_loop()
 
@@ -321,6 +339,38 @@ class WebSocketHandler:
         else:
             if msg_type != "frontend-playback-complete":
                 logger.warning(f"Unknown message type: {msg_type}")
+
+    async def _handle_frontend_playback_complete(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """
+        When the frontend finishes playing audio, optionally trigger VN auto-advance
+        (click so the visual novel advances to the next dialogue).
+        """
+        import os
+        logger.info(
+            f"frontend-playback-complete received | client={client_uid} vn_turn={self._vn_turn_in_progress} vn_primary={self._vn_primary_client_uid} vn_reader={self._vn_reader is not None}"
+        )
+        do_advance = (
+            self._vn_turn_in_progress
+            and client_uid == self._vn_primary_client_uid
+            and os.getenv("ENABLE_VN_AUTO_ADVANCE", "true").lower() in ("1", "true", "yes", "on")
+        )
+        if do_advance:
+            # Use same config as VN reader (same monitor + ROI as OCR)
+            config = self._vn_config if self._vn_config is not None else VNReaderConfig()
+            logger.info(
+                "VN auto-advance: triggering click now (playback complete) monitor_index=%s roi_rel=%s",
+                config.monitor_index,
+                config.roi_rel,
+            )
+            await asyncio.to_thread(trigger_vn_advance, config)
+            self._vn_turn_in_progress = False
+        else:
+            if self._vn_turn_in_progress and client_uid != self._vn_primary_client_uid:
+                logger.info("VN auto-advance: skipped (not primary VN client)")
+            elif not self._vn_turn_in_progress:
+                logger.info("VN auto-advance: skipped (vn_turn=False, not a VN dialogue turn)")
 
     async def _handle_group_operation(
         self, websocket: WebSocket, client_uid: str, data: dict
@@ -577,6 +627,15 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
         """Handle triggers that start a conversation"""
+        # Mark as VN turn when input is game dialogue (manual or from VN reader).
+        # Enables auto-advance after playback. Works even if VN reader is not started.
+        if (
+            data.get("type") == "text-input"
+            and "[GAME DIALOGUE" in (data.get("text") or "")
+            and client_uid == self._vn_primary_client_uid
+        ):
+            self._vn_turn_in_progress = True
+            logger.info("VN turn started (auto-advance will run after Adriana finishes speaking)")
         await handle_conversation_trigger(
             msg_type=data.get("type", ""),
             data=data,
