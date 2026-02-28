@@ -4,6 +4,7 @@ from pathlib import Path
 
 from loguru import logger
 from elevenlabs.client import ElevenLabs
+from elevenlabs.types import VoiceSettings
 
 from .tts_interface import TTSInterface
 
@@ -93,18 +94,18 @@ class TTSEngine(TTSInterface):
                 f"Generating audio via ElevenLabs for text: '{text[:50]}...' with voice '{self.voice_id}' model '{self.model_id}'"
             )
 
-            # Generate audio using ElevenLabs API
+            # Generate audio using ElevenLabs API (voice_id is first positional arg in SDK 2.x)
             audio = self.client.text_to_speech.convert(
+                self.voice_id,
                 text=text,
-                voice_id=self.voice_id,
                 model_id=self.model_id,
                 output_format=self.output_format,
-                voice_settings={
-                    "stability": self.stability,
-                    "similarity_boost": self.similarity_boost,
-                    "style": self.style,
-                    "use_speaker_boost": self.use_speaker_boost,
-                },
+                voice_settings=VoiceSettings(
+                    stability=self.stability,
+                    similarity_boost=self.similarity_boost,
+                    style=self.style,
+                    use_speaker_boost=self.use_speaker_boost,
+                ),
             )
 
             # Write the audio data to file
