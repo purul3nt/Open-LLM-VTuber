@@ -23,6 +23,9 @@ class SystemConfig(I18nMixin):
     port: int = Field(..., alias="port")
     config_alts_dir: str = Field(..., alias="config_alts_dir")
     tool_prompts: Dict[str, str] = Field(..., alias="tool_prompts")
+    proactive_speak_cooldown_seconds: float = Field(
+        99.0, alias="proactive_speak_cooldown_seconds"
+    )
     enable_proxy: bool = Field(False, alias="enable_proxy")
     enable_vn_reader: bool = Field(False, alias="enable_vn_reader")
     vn_reader_config: Optional[VNReaderConfigSchema] = Field(
@@ -39,6 +42,10 @@ class SystemConfig(I18nMixin):
         "tool_prompts": Description(
             en="Tool prompts to be inserted into persona prompt",
             zh="要插入到角色提示词中的工具提示词",
+        ),
+        "proactive_speak_cooldown_seconds": Description(
+            en="Minimum seconds between proactive-speak LLM calls (0 = no cooldown)",
+            zh="主动发言 LLM 调用之间的最小间隔秒数（0=无冷却）",
         ),
         "enable_proxy": Description(
             en="Enable proxy mode for multiple clients",

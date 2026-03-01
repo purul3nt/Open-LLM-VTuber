@@ -11,7 +11,7 @@ import pytesseract
 
 
 # Don't trigger LLM more than once per this many seconds (avoids 429s, matches human speaking pace)
-MIN_SECONDS_BETWEEN_VN_CALLS = 15.0
+MIN_SECONDS_BETWEEN_VN_CALLS = 2.0
 
 
 @dataclass
